@@ -1,0 +1,10 @@
+#ignore file extensions
+*.out
+*~
+
+#ignore auxiliary directories
+.idea/
+.cache/
+*.ipynb_checkpoints/
+.pytest_cache/
+*.DS_Store
