@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 
-###################################################################
-# A simple module that fits a 2D PSF analytic profile to an image #
-###################################################################
+############################################################
+# A module that fits a 2D PSF analytic profile to an image #
+############################################################
 
 import numpy as np
 import warnings
 import emcee
-from scipy import optimize
+from scipy import optimize, signal
 import astropy.modeling as modeling
 
 class PSFfit(object):
@@ -101,15 +101,16 @@ class PSFfit(object):
         self.bestfitmodel = None
         self.lnlike = -np.inf
 
-    def generate_data_stamp(self, frame, ivar=None, x0=None, y0=None, method='maxpix', r_tol=None):
+    def generate_data_stamp(self, frame, x0, y0, ivar=None, method='maxpix', r_tol=None, smooth=False,
+                            sig=1., kernel_size=None):
         '''
         Crop a box of side length fitboxsize around (xc, yc) for psf fitting, where (xc, yc) will be selected using
         the specified method.
 
         Args:
             frame: a 2D image
-            ivar: corresponding inverse variance of the image
             x0, y0: center coordinate around which to crop data (i.e. initial guess centroid of the target)
+            ivar: corresponding inverse variance of the image
             method: 'input', crops around the input indices [int(x0), int(y0)]
                     'maxpix', crops around the maximum pixel. If (x0, y0) are given, then find the maximum pixel
                     within a fitbox centered at (x0, y0), otherwise, find the maximum pixel over the whole frame,
@@ -125,9 +126,11 @@ class PSFfit(object):
         if len(frame.shape) != 2:
             raise ValueError('image data must be a 2D array')
         if ivar is None:
-            ivar = np.ones(frame.shape)
+            noise_region = frame[frame < np.percentile(frame, 80)]
+            variance = np.std(noise_region) ** 2
+            ivar = 1. / (np.abs(frame) + variance)
         if frame.shape != ivar.shape:
-            print('shapes of data frames and inverse variance frames do not match, default to unit variances...')
+            warnings.warn('shapes of data frames and inverse variance frames do not match, default to unit variances...')
 
         if self.fitboxsize is None:
             method = 'fullframe'
@@ -139,20 +142,23 @@ class PSFfit(object):
         if r_tol is None:
             r_tol = self.fitboxsize // 2
 
-        mask = np.ones(frame.shape)
-        if (x0 is not None) and (y0 is not None):
-            xc = np.rint(x0).astype(int)
-            yc = np.rint(y0).astype(int)
+        if smooth:
+            frame = smooth_image(frame, sig, ivar, kernel_size)
 
-            if method.lower() == 'input':
-                ymin, ymax, xmin, xmax = find_ind_bounds(yc, xc, self.fitboxsize)
-                stamp = frame[ymin: ymax, xmin: xmax]
-                ivar_stamp = ivar[ymin: ymax, xmin:xmax]
-            else:
-                # create mask that masks the pixels outside the fitbox
-                ymin, ymax, xmin, xmax = find_ind_bounds(yc, xc, r_tol * 2 + 1)
-                mask[ymin:ymax, xmin:xmax] = 0
-                mask = 1 - mask
+        mask = np.ones(frame.shape)
+
+        xc = np.rint(x0).astype(int)
+        yc = np.rint(y0).astype(int)
+
+        if method.lower() == 'input':
+            ymin, ymax, xmin, xmax = find_ind_bounds(yc, xc, self.fitboxsize)
+            stamp = frame[ymin: ymax, xmin: xmax]
+            ivar_stamp = ivar[ymin: ymax, xmin:xmax]
+        else:
+            # create mask that masks the pixels outside the fitbox
+            ymin, ymax, xmin, xmax = find_ind_bounds(yc, xc, r_tol * 2 + 1)
+            mask[ymin:ymax, xmin:xmax] = 0
+            mask = 1 - mask
 
         if method.lower() == 'maxpix':
             # define maximum pixel location as new center around which to crop
@@ -160,6 +166,7 @@ class PSFfit(object):
             ymin, ymax, xmin, xmax = find_ind_bounds(yc, xc, self.fitboxsize)
             stamp = frame[ymin: ymax, xmin: xmax]
             ivar_stamp = ivar[ymin: ymax, xmin:xmax]
+
         elif method.lower() == 'fullframe':
             if frame.shape[0] != frame.shape[1]:
                 warnings.warn('only square image fitting are supported, automatically cropping a square of the smaller '
@@ -176,6 +183,38 @@ class PSFfit(object):
         self.ivar_stamp = ivar_stamp
         self.data_stamp_x_center = xc
         self.data_stamp_y_center = yc
+
+def smooth_image(im, sig, ivar=None, kernel_size=None):
+    '''
+    Convolution with a gaussian kernel
+    Args:
+        im: 2D ndarray, must not have NaNs
+        sig:
+        ivar:
+
+    Returns:
+
+    '''
+
+    if ivar is None:
+        ivar = np.ones(im.shape)
+
+    if kernel_size is None:
+        nx = int(sig * 4 + 1) * 2 + 1
+    else:
+        nx = kernel_size
+        if nx % 2 == 0:
+            nx += 1
+
+    x = np.arange(nx) - nx // 2
+    x, y = np.meshgrid(x, x)
+
+    window = np.exp(-(x ** 2 + y ** 2) / (2 * sig ** 2))
+    imsmooth = signal.convolve2d(im * ivar, window, mode='same')
+    imsmooth /= signal.convolve2d(ivar, window, mode='same') + 1e-35
+    imsmooth *= im != 0
+
+    return imsmooth
 
 def find_ind_bounds(yc, xc, boxsize, ylim=np.inf, xlim=np.inf, warn=True):
     '''
@@ -310,13 +349,13 @@ def generate_airydisk_model(params, boxsize):
 
     return psf
 
-def chi2_marginalized(p, fitobj, model='moffat', fitbg=True):
+def _chi2_marginalized(p, fitobj, model='moffat', fitbg=True):
 
-    lnlike = lnlike_marginalized(p, fitobj, model=model, fitbg=fitbg)
+    lnlike = _lnlike_marginalized(p, fitobj, model=model, fitbg=fitbg)
 
     return -2. * lnlike
 
-def lnlike_marginalized(p, fitobj, model='moffat', fitbg=True, full_result=False):
+def _lnlike_marginalized(p, fitobj, model='moffat', fitbg=True, full_result=False):
     '''
     Args:
         p: non linear model parameters
@@ -437,17 +476,17 @@ def non_lin_opt_fit(image, x0, y0, fwhmx, fwhmy, theta=0., beta=2., ivar=None, m
         p0 = np.array([x0, y0, varx, vary, theta])
         dof = 6
 
-    result = optimize.minimize(chi2_marginalized, p0, (fit, model, fitbg), method=opt_method)
+    result = optimize.minimize(_chi2_marginalized, p0, (fit, model, fitbg), method=opt_method)
 
     if enforce_chisqr and result.success:
         if np.isfinite(result.fun):
             chisqr_dof = result.fun / (fit.fitboxsize ** 2 - dof)
             if chisqr_dof > 2. or chisqr_dof < 0.5:
                 fit.ivar_stamp /= chisqr_dof
-                result = optimize.minimize(chi2_marginalized, p0, (fit, model, fitbg), method=opt_method)
+                result = optimize.minimize(_chi2_marginalized, p0, (fit, model, fitbg), method=opt_method)
 
     if np.isfinite(result.fun):
-        lnlike, linparam, psf = lnlike_marginalized(result.x, fit, model, fitbg, full_result=True)
+        lnlike, linparam, psf = _lnlike_marginalized(result.x, fit, model, fitbg, full_result=True)
         fit.lnlike = lnlike
         fit.fitx = result.x[0]
         fit.fity = result.x[1]
@@ -466,20 +505,19 @@ def non_lin_opt_fit(image, x0, y0, fwhmx, fwhmy, theta=0., beta=2., ivar=None, m
 
     return fit, result
 
-def mcmc_fit(image, x0, y0, fwhmx, fwhmy, theta=0., beta=2., ivar=None, model='moffat', fitboxsize=15,
-             fitbg=True, crop_method='input', nwalkers=20, nsteps=5000, discard=1000, progress=True):
+def mcmc_fit(fit, fwhmx, fwhmy, theta=0., beta=2., xguess=None, yguess=None, model='moffat', fitbg=True,
+             nwalkers=20, nsteps=5000, discard=1000, progress=True):
     '''
-    Wrapper to run an mcmc PSF fit
+    Run an mcmc PSF fit of a single analytical model to the data
 
     Args:
         image: 2D numpy array
-        x0: scalar, initial guess for x pixel location, integer would suffice
-        y0: scalar, initial guess for y pixel location, integer would suffice
         fwhmx: scalar, fwhm along x-axis (before rotation)
         fwhmy: scalar, fwhm along y-axis (before rotation)
         theta: scalar, angle of rotation in radians, counter-clockwise
         beta: scalar, exponent in the moffat profile formula
-        ivar: 2D numpy array, inverse variance frame for the image, optional
+        xguess: int, initial guess for x pixel location (if the default guess in the PSFfit object is not good enough)
+        yguess: int, initial guess for y pixel location (if the default guess in the PSFfit object is not good enough)
         model: string, type of analytical profile to fit, accepts 'moffat' and 'gaussian'
         fitboxsize: integer, side length of the square box used for fitting
         fitbg: bool, whether to fit for a constant background
@@ -498,25 +536,26 @@ def mcmc_fit(image, x0, y0, fwhmx, fwhmy, theta=0., beta=2., ivar=None, model='m
     if model.lower() != 'moffat' and model.lower() != 'gaussian' and model.lower() != 'airy':
         raise ValueError('Analytical model: {} is not supported'.format(model))
 
-    # initialize a PSFfit object to store data stamp and best fit results
-    fit = PSFfit(fitboxsize)
-    fit.generate_data_stamp(image, ivar=ivar, x0=x0, y0=y0, method=crop_method)
+    if xguess is None:
+        xguess = fit.data_stamp_x_center
+    if yguess is None:
+        yguess = fit.data_stamp_y_center
 
     # set up initial guesses
     if model.lower() == 'moffat':
         ndim = 6
-        p0 = np.array([x0, y0, fwhmx, fwhmy, theta, beta])
+        p0 = np.array([xguess, yguess, fwhmx, fwhmy, theta, beta])
     elif model.lower() == 'gaussian':
         ndim = 5
         varx = fwhmx ** 2 / (8. * np.log(2))
         vary = fwhmy ** 2 / (8. * np.log(2))
-        p0 = np.array([x0, y0, varx, vary, theta])
+        p0 = np.array([xguess, yguess, varx, vary, theta])
     elif model.lower() == 'airy':
         if fwhmx != fwhmy:
             raise ValueError('airy models must be azimuthually symmetric, fwhmx and fwhmy must be the same')
 
         ndim = 3
-        p0 = np.array([x0, y0, fwhmx])
+        p0 = np.array([xguess, yguess, fwhmx])
 
     # create initial guesses for all walkers
     p0 = np.tile(p0, (nwalkers, 1))
@@ -525,7 +564,7 @@ def mcmc_fit(image, x0, y0, fwhmx, fwhmy, theta=0., beta=2., ivar=None, model='m
     p0 = np.random.randn(nwalkers, ndim) * random_coeff + p0
 
     # run mcmc
-    sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike_marginalized, args=[fit, model, fitbg])
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, _lnlike_marginalized, args=[fit, model, fitbg])
     sampler.run_mcmc(p0, nsteps, progress=progress)
 
     # save results
@@ -552,7 +591,7 @@ def mcmc_fit(image, x0, y0, fwhmx, fwhmy, theta=0., beta=2., ivar=None, model='m
         fit.fitbetaerr = 0.5 * (np.abs(errorbars[5, 0]) + np.abs(errorbars[5, 1]))
 
     try:
-        lnlike, linparam, psf = lnlike_marginalized(mcmc[:, 1], fit, model, fitbg, full_result=True)
+        lnlike, linparam, psf = _lnlike_marginalized(mcmc[:, 1], fit, model, fitbg, full_result=True)
     except:
         raise ValueError('mcmc failed, please plot chains to inspect manually')
     fit.lnlike = lnlike

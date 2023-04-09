@@ -6,5 +6,5 @@
 .idea/
 .cache/
 *.ipynb_checkpoints/
-.pytest_cache/
+*cache__*
 *.DS_Store
