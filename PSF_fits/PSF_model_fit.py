@@ -77,11 +77,18 @@ class PSFfit(object):
     def bestfitmodel(self, newval):
         self._bestfitmodel = newval
 
-    def __init__(self, fitboxsize=None):
+    def __init__(self, fitboxsize=None, multibox=False):
+        '''
+
+        Args:
+            fitboxsize: int, pixel size of the fitbox
+            multibox: bool, whether this PSFfit object will use two separate fitboxes for the two sources
+        '''
 
         self.fitboxsize = fitboxsize
-        self.data_stamp = None
-        self.ivar_stamp = None
+        self.multibox = multibox
+        self.data_stamp = [] if multibox else None
+        self.ivar_stamp = [] if multibox else None
         self.fitx = None
         self.fitxerr = None
         self.fity = None
@@ -96,9 +103,9 @@ class PSFfit(object):
         self.fitthetaerr = None
         self.fitbeta = None
         self.fitbetaerr = None
-        self.fitbg = 0.
+        self.fitbg = None
         self.fitbgerr = None
-        self.bestfitmodel = None
+        self.bestfitmodel = [] if multibox else None
         self.lnlike = -np.inf
 
     def generate_data_stamp(self, frame, x0, y0, ivar=None, method='maxpix', r_tol=None, smooth=False,
@@ -118,6 +125,9 @@ class PSFfit(object):
                     'fullframe', use the given frame without cropping
             r_tol: tolerance for how far away (in pixels in either direction) the new cropping center can be from
                    the provided input
+            smooth: bool, whether to smooth the given image with a gaussian kernel
+            sig: the sigma of the smoothing kernel
+            kernel_size: the pixel size of the square kernel, will be automatically normalized
 
         Returns:
             initializes relevant class attributes
@@ -177,12 +187,20 @@ class PSFfit(object):
             stamp = frame[:self.fitboxsize,:self.fitboxsize]
             ivar_stamp = ivar[:self.fitboxsize,:self.fitboxsize]
 
-        self.fitx = xc
-        self.fity = yc
-        self.data_stamp = stamp
-        self.ivar_stamp = ivar_stamp
-        self.data_stamp_x_center = xc
-        self.data_stamp_y_center = yc
+        if self.multibox:
+            self.fitx.append(xc)
+            self.fity.append(yc)
+            self.data_stamp.append(stamp)
+            self.ivar_stamp.append(ivar_stamp)
+            self.data_stamp_x_center.append(xc)
+            self.data_stamp_y_center.append(yc)
+        else:
+            self.fitx = xc
+            self.fity = yc
+            self.data_stamp = stamp
+            self.ivar_stamp = ivar_stamp
+            self.data_stamp_x_center = xc
+            self.data_stamp_y_center = yc
 
 def smooth_image(im, sig, ivar=None, kernel_size=None):
     '''

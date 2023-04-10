@@ -57,26 +57,24 @@ def _lnlike_marginalized(p, fitobj, twofitboxes=False, model='moffat', fitbg=Fal
         marginalized log likelihood
     '''
 
-    if fitobj.data_stamps.shape[-1] != fitobj.data_stamps.shape[-2]:
-        raise ValueError('Model fitting currently only supports square data stamp')
     p = np.array(p)
 
     boxsize = fitobj.fitboxsize
     if twofitboxes:
         p_boxes = np.copy(p) # shift positions of sources into their own corresponding fitbox frames
         # crop separate fit boxes for each source and adjust the initial guess positions for the offset
-        data_stamp1 = fitobj.data_stamps[0]
-        ivar_stamp1 = fitobj.ivar_stamps[0]
+        data_stamp1 = fitobj.data_stamp[0]
+        ivar_stamp1 = fitobj.ivar_stamp[0]
         p_box1 = np.copy(p) # shift position of sources into the frame of the first fitbox
-        x_offset = fitobj.data_stamp_x_centers[0] - boxsize // 2
-        y_offset = fitobj.data_stamp_y_centers[0] - boxsize // 2
+        x_offset = fitobj.data_stamp_x_center[0] - boxsize // 2
+        y_offset = fitobj.data_stamp_y_center[0] - boxsize // 2
         p_box1[:4] -= np.array([x_offset, y_offset, x_offset, y_offset])
         p_boxes[:2] -= np.array([x_offset, y_offset])
-        data_stamp2 = fitobj.data_stamps[1]
-        ivar_stamp2 = fitobj.ivar_stamps[1]
+        data_stamp2 = fitobj.data_stamp[1]
+        ivar_stamp2 = fitobj.ivar_stamp[1]
         p_box2 = np.copy(p) # shift position of sources into the frame of the first fitbox
-        x_offset = fitobj.data_stamp_x_centers[1] - boxsize // 2
-        y_offset = fitobj.data_stamp_y_centers[1] - boxsize // 2
+        x_offset = fitobj.data_stamp_x_center[1] - boxsize // 2
+        y_offset = fitobj.data_stamp_y_center[1] - boxsize // 2
         p_box2[:4] -= np.array([x_offset, y_offset, x_offset, y_offset])
         p_boxes[2:4] -= np.array([x_offset, y_offset])
         if not _model_params_are_physical(p_boxes, boxsize):
@@ -99,12 +97,17 @@ def _lnlike_marginalized(p, fitobj, twofitboxes=False, model='moffat', fitbg=Fal
         psf1_good = np.concatenate((psf1_box1.flatten(), psf1_box2.flatten()))
         psf2_good = np.concatenate((psf2_box1.flatten(), psf2_box2.flatten()))
     else:
+        params = np.copy(p)
+        x_offset = fitobj.data_stamp_x_center - boxsize // 2
+        y_offset = fitobj.data_stamp_y_center - boxsize // 2
+        params[[0, 2]] -= x_offset
+        params[[1, 3]] -= y_offset
         if model.lower() == 'gaussian':
-            psf1 = PSFfit.generate_elliptical_gaussian_model(p[[0, 1, 4, 5, 6]], boxsize)
-            psf2 = PSFfit.generate_elliptical_gaussian_model(p[2:7], boxsize)
+            psf1 = PSFfit.generate_elliptical_gaussian_model(params[[0, 1, 4, 5, 6]], boxsize)
+            psf2 = PSFfit.generate_elliptical_gaussian_model(params[2:7], boxsize)
         elif model.lower() == 'moffat':
-            psf1 = PSFfit.generate_elliptical_moffat_model(p[[0, 1, 4, 5, 6, 7]], boxsize)
-            psf2 = PSFfit.generate_elliptical_moffat_model(p[2:8], boxsize)
+            psf1 = PSFfit.generate_elliptical_moffat_model(params[[0, 1, 4, 5, 6, 7]], boxsize)
+            psf2 = PSFfit.generate_elliptical_moffat_model(params[2:8], boxsize)
         # flatten data and model
         # establish the linear part of the model Ax = y, where A is the model matrix, x the linear parameters matrix
         # and y is the data
@@ -164,7 +167,7 @@ def _lnlike_marginalized(p, fitobj, twofitboxes=False, model='moffat', fitbg=Fal
     return lnlike
 
 def opt_fit(fit_obj, pri_loc, sec_loc, fwhmx, fwhmy, theta, beta, twofitboxes=False, model='moffat',
-            method='Nelder-Mead', enforce_chisqr=True, silent=True):
+            method='Nelder-Mead', fitbg=False, enforce_chisqr=True, silent=True):
     '''
     Run a non-linear optimization PSF fit
 
@@ -207,14 +210,14 @@ def opt_fit(fit_obj, pri_loc, sec_loc, fwhmx, fwhmy, theta, beta, twofitboxes=Fa
         vary = fwhmy ** 2 / (8. * np.log(2))
         p0 = np.array([pri_loc[0], pri_loc[1], sec_loc[0], sec_loc[1], varx, vary, theta])
 
-    result = optimize.minimize(_chisqr_marginalized, p0, (fit_obj, twofitboxes, model, False), method=method)
+    result = optimize.minimize(_chisqr_marginalized, p0, (fit_obj, twofitboxes, model, fitbg), method=method)
 
     if enforce_chisqr and result.success:
         if np.isfinite(result.fun):
             chisqr_dof = result.fun / (fit_obj.fitboxsize ** 2 - dof)
             if chisqr_dof > 2. or chisqr_dof < 0.5:
-                fit_obj.ivar_stamps /= chisqr_dof
-                result = optimize.minimize(_chisqr_marginalized, p0, (fit_obj, twofitboxes, model, False),
+                fit_obj.ivar_stamp /= chisqr_dof
+                result = optimize.minimize(_chisqr_marginalized, p0, (fit_obj, twofitboxes, model, fitbg),
                                            method=method)
 
     if not result.success:
@@ -222,27 +225,39 @@ def opt_fit(fit_obj, pri_loc, sec_loc, fwhmx, fwhmy, theta, beta, twofitboxes=Fa
             sys.stdout.write('\n')
             print('optimization did not converge')
         Cmodel = np.zeros((2, 2))
-        linparams = np.array([0, 0])
-        if twofitboxes:
-            fit_obj.bestfitmodels = None
-        else:
-            fit_obj.bestfitmodel = None
+        fit_obj.fitf = np.array([0, 0])
+        fit_obj.bestfitmodel = None
 
     else:
         if twofitboxes:
             lnlike, linparams, psf1_box1, psf2_box1, \
-            psf1_box2, psf2_box2, Cmodel = _lnlike_marginalized(result.x, fit_obj, twofitboxes, model, False,
+            psf1_box2, psf2_box2, Cmodel = _lnlike_marginalized(result.x, fit_obj, twofitboxes, model, fitbg,
                                                                full_result=True)
-            fit_obj.bestfitmodels.append(linparams[0] * psf1_box1 + linparams[1] * psf2_box1)
-            fit_obj.bestfitmodels.append(linparams[0] * psf1_box2 + linparams[1] * psf2_box2)
-            fit_obj.bestfitmodels = np.array(fit_obj.bestfitmodels)
+            fit_obj.fitx = result.x[[0, 2]]
+            fit_obj.fity = result.x[[1, 3]]
+            fit_obj.fitfwhmx = result.x[4]
+            fit_obj.fitfwhmy = result.x[5]
+            fit_obj.fittheta = result.x[6]
+            if model.lower() == 'moffat':
+                fit_obj.fitbeta = result.x[7]
+            fit_obj.fitf = linparams
+            fit_obj.bestfitmodel.append(linparams[0] * psf1_box1 + linparams[1] * psf2_box1)
+            fit_obj.bestfitmodel.append(linparams[0] * psf1_box2 + linparams[1] * psf2_box2)
+            fit_obj.bestfitmodel = np.array(fit_obj.bestfitmodel)
         else:
-            lnlike, linparams, psf1, psf2, Cmodel = _lnlike_marginalized(result.x, fit_obj, twofitboxes, model, False,
+            lnlike, linparams, psf1, psf2, Cmodel = _lnlike_marginalized(result.x, fit_obj, twofitboxes, model, fitbg,
                                                                         full_result=True)
+            fit_obj.fitx = result.x[[0, 2]]
+            fit_obj.fity = result.x[[1, 3]]
+            fit_obj.fitfwhmx = result.x[4]
+            fit_obj.fitfwhmy = result.x[5]
+            fit_obj.fittheta = result.x[6]
+            if model.lower() == 'moffat':
+                fit_obj.fitbeta = result.x[7]
+            fit_obj.fitf = linparams
             fit_obj.bestfitmodel = linparams[0] * psf1 + linparams[1] * psf2
-            fit_obj.bestfitmodels = fit_obj.bestfitmodel
 
-    return result, linparams, Cmodel
+    return fit_obj, Cmodel
 
 def mcmc_fit(fit_obj, pri_loc, sec_loc, fwhmx, fwhmy, theta, beta, twofitboxes=False, model='moffat',
              enforce_chisqr=False, silent=True):
